@@ -1,0 +1,124 @@
+version: '3.8'
+
+volumes:
+  db_storage:
+  n8n_storage:
+  redis_storage:
+
+x-shared: &shared
+  restart: always
+  image: docker.n8n.io/n8nio/n8n
+  environment:
+    - DB_TYPE=postgresdb
+    - DB_POSTGRESDB_HOST=postgres
+    - DB_POSTGRESDB_PORT=5432
+    - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+    - DB_POSTGRESDB_USER=${POSTGRES_NON_ROOT_USER}
+    - DB_POSTGRESDB_PASSWORD=${POSTGRES_NON_ROOT_PASSWORD}
+    - N8N_DISABLE_PRODUCTION_MAIN_PROCESS=${N8N_DISABLE_PRODUCTION_MAIN_PROCESS}
+    - N8N_DIAGNOSTICS_ENABLED=${N8N_DIAGNOSTICS_ENABLED}
+    - N8N_HOST=${SUBDOMAIN}.${DOMAIN_NAME}
+    - N8N_PORT=5678
+    - NODE_ENV=${NODE_ENV}
+    - N8N_PROTOCOL=${N8N_PROTOCOL}
+    - N8N_SECURE_COOKIE=${N8N_SECURE_COOKIE}
+    - WEBHOOK_URL=https://${SUBDOMAIN}.${DOMAIN_NAME}/
+    - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+    - EXECUTIONS_MODE=queue
+    - QUEUE_BULL_REDIS_HOST=redis
+    - QUEUE_HEALTH_CHECK_ACTIVE=true
+    - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+  volumes:
+    - n8n_storage:/home/node/.n8n
+  depends_on:
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    restart: always
+    networks:
+      - nginx-network
+    environment:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+      - POSTGRES_DB
+      - POSTGRES_NON_ROOT_USER
+      - POSTGRES_NON_ROOT_PASSWORD
+    volumes:
+      - db_storage:/var/lib/postgresql/data
+      - ./init-data.sh:/docker-entrypoint-initdb.d/init-data.sh
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:6-alpine
+    restart: always
+    networks:
+      - nginx-network
+    volumes:
+      - redis_storage:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  n8n:
+    <<: *shared
+    networks:
+      - nginx-network
+    ports:
+      - 5678:5678
+    volumes:
+      - ./local-files:/files
+
+  n8n-worker:
+    <<: *shared
+    networks:
+      - nginx-network
+    command: worker
+    depends_on:
+      - n8n
+
+  nginx:
+    image: nginx:latest
+    restart: always
+    environment:
+      - SUBDOMAIN=${SUBDOMAIN}
+      - DOMAIN_NAME=${DOMAIN_NAME}
+    networks:
+      - nginx-network
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf.local.template:/etc/nginx/nginx.conf.local.template:ro
+      - ./nginx/init-nginx.sh:/docker-entrypoint.d/init-nginx.sh:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      # - ./certbot/conf:/etc/letsencrypt
+      # - ./certbot/www:/var/www/certbot
+    entrypoint: /docker-entrypoint.d/init-nginx.sh
+    depends_on:
+      - n8n
+
+  # certbot:
+  #   image: certbot/certbot
+  #   networks:
+  #     - nginx-network
+  #   volumes:
+  #     - ./certbot/conf:/etc/letsencrypt
+  #     - ./certbot/www:/var/www/certbot
+  #   entrypoint: >
+  #     sh -c "certbot certonly --webroot --webroot-path=/var/www/certbot
+  #     --email ${SSL_EMAIL} --agree-tos --no-eff-email
+  #     -d ${SUBDOMAIN}.${DOMAIN_NAME}"
+
+networks:
+  nginx-network:
